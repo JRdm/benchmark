@@ -1,4 +1,23 @@
 {
+  "configurations" : [
+    {
+      "global":
+      {
+        "hive_metastore_user_passwd":"p"
+      }
+    },
+    { 
+      "hive-site":
+      {
+        "javax.jdo.option.ConnectionPassword":"p",
+        "hive.security.authenticator.manager":"org.apache.hadoop.hive.ql.security.HadoopDefaultAuthenticator",
+        "hive.execution.engine":"tez",
+        "hive.exec.failure.hooks":" ",
+        "hive.exec.pre.hooks":" ",
+        "hive.exec.post.hooks":" "
+      }
+    }
+  ],
   "host_groups" : [
     {
       "name" : "master",
@@ -17,6 +36,21 @@
       },
       {
         "name" : "ZOOKEEPER_SERVER"
+      },
+      {
+        "name" : "TEZ_CLIENT"
+      },
+      {
+        "name" : "HIVE_CLIENT"
+      },
+      {
+        "name" : "HIVE_METASTORE"
+      },
+      {
+        "name" : "HIVE_SERVER"
+      },
+      {
+        "name" : "MYSQL_SERVER"
       }
       ],
       "cardinality" : "1"
@@ -41,13 +75,19 @@
       },
       {
         "name" : "ZOOKEEPER_CLIENT"
+      },
+      {
+        "name" : "TEZ_CLIENT"
+      },
+      {
+        "name" : "HIVE_CLIENT"
       }
       ],
       "cardinality" : "5"
     }
   ],
   "Blueprints" : {
-    "blueprint_name" : "multi-node-hdfs-yarn",
+    "blueprint_name" : "hadoop-benchmark",
     "stack_name" : "HDP",
     "stack_version" : "2.1"
   }

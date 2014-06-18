@@ -30,6 +30,7 @@ import sys
 import tempfile
 import time
 import urllib2
+import requests
 import threading
 import json
 from optparse import OptionParser
@@ -384,6 +385,37 @@ def get_existing_cluster(conn, OPTS, cluster_name, die_on_error=True):
     print "ERROR: Could not find any existing cluster"
     sys.exit(1)
 
+def ambari_get(host, path):
+  print "http://%s:8080%s" % (host, path)
+  return requests.get("http://%s:8080%s" % (host, path), auth=('admin', 'admin'), headers={"X-Requested-By":'Pythian'})
+
+def ambari_post(host, path, body):
+  return requests.post("http://%s:8080%s" % (host, path), auth=('admin','admin'), data=body, headers={"X-Requested-By":'Pythian'})
+
+def wait_for_ambari_master(ambari):
+  print "Waiting for Ambari master to start"
+  while True:
+    try:
+      r = ambari_get(ambari.public_dns_name, '/api/v1/clusters')
+      print "Got Ambari master"
+      return
+    except Exception,e :
+      print "Server unavailable, waiting 10 seconds"
+      time.sleep(10) 
+
+def upload_ambari_blueprint(ambari, master, slaves):
+  with open('blueprint-5.json') as f:
+    doc = json.loads(f.read())
+    for g in doc['host_groups']:
+      if g['name'] == 'slaves':
+        g['cardinality'] = len(slaves)
+  
+  print "Uploading ambari blueprint for hadoop-benchmark"
+  print ambari_post(ambari.public_dns_name, '/api/v1/blueprints/hadoop-benchmark', json.dumps(doc))  
+  print "Uploading cluster configuration"
+  blueprint_hosts = json.dumps ({"blueprint":"hadoop-benchmark", "host_groups":[{"name":"master", "hosts":[{"fqdn":master.private_dns_name}]}, {"name":"slaves", "hosts":[{'fqdn':f.private_dns_name} for f in slaves]}]})
+  print blueprint_hosts
+  print ambari_post(ambari.public_dns_name, '/api/v1/clusters/hive-bench', blueprint_hosts)
 
 # Deploy configuration files and run setup scripts on a newly launched
 # or started EC2 cluster.
@@ -409,6 +441,9 @@ def setup_cluster(conn, master_nodes, slave_nodes, ambari_nodes, OPTS, deploy_ss
   print "Setting up ambari node..."
   setup_ambari_master(ambari, OPTS)
 
+  print "Starting Ambari server..."
+  ssh(ambari.public_dns_name, OPTS, "nohup ambari-server start; sleep 10; ambari-server status;", flags="")
+
   print "Setting up ambari agent on master..."
   setup_ambari_slave(ambari, master, OPTS)
 
@@ -428,9 +463,8 @@ def setup_cluster(conn, master_nodes, slave_nodes, ambari_nodes, OPTS, deploy_ss
     'cluster' : cluster_name,
   }
 
-  ssh(ambari.public_dns_name, OPTS, "ambari-server start;")
-
-  blueprint_hosts = json.dumps ({"blueprint":"hadoop-benchmark", "host_groups":[{"name":"master", "hosts":[{"fqdn":master.private_dns_name}]}, {"name":"slaves", "hosts":[{'fqdn':f.private_dns_name} for f in slaves]}]})
+  wait_for_ambari_master(ambari[0])
+  upload_ambari_blueprint(ambari[0], master_nodes[0], slave_nodes)
 
   print "Ambari: %s" % ambari.public_dns_name
   print "Master: %s" % master.public_dns_name
@@ -491,13 +525,11 @@ def setup_ambari_master(ambari, OPTS):
         yum -y repolist;
         yum -y install ambari-server;
         echo n > heredoc;
-        echo 1 > heredoc;
-        echo y > heredoc;
-        echo n > heredoc;
+        echo 1 >> heredoc;
+        echo y >> heredoc;
+        echo n >> heredoc;
         ambari-server setup <heredoc;
-        rm heredoc
-        ambari-server start;
-        ambari-server status;
+        rm heredoc;
         """
   ssh(ambari.public_dns_name, OPTS, cmd, stdin=None)
 
@@ -542,9 +574,9 @@ def scp_download(host, OPTS, remote_file, local_file):
 
 # Run a command on a host through ssh, retrying up to two times
 # and then throwing an exception if ssh continues to fail.
-def ssh(host, OPTS, command, stdin=open(os.devnull, 'w')):
+def ssh(host, OPTS, command, stdin=open(os.devnull, 'w'), flags="-t -t"):
   command = command.replace('\n', ' ')
-  cmd = "ssh -t -t -o StrictHostKeyChecking=no -i %s %s@%s '%s'" % (OPTS.identity_file, OPTS.user, host, command)
+  cmd = "ssh %s -o StrictHostKeyChecking=no -i %s %s@%s '%s'" % (flags, OPTS.identity_file, OPTS.user, host, command)
   print cmd
   tries = 0
   while True:
@@ -607,8 +639,15 @@ def main():
   elif action == "ambari-start":
     (master, slave_nodes, ambari) = get_existing_cluster(
       conn, OPTS, cluster_name, die_on_error=False)
-    print ambari[0].public_dns_name
-    ssh(ambari[0].public_dns_name, OPTS, "ambari-server start; ambari-server status;")
+    ssh(ambari[0].public_dns_name, OPTS, "ambari-server start; sleep 10; ambari-server status;", flags="")
+    for f in slave_nodes:
+      ssh(f.public_dns_name, OPTS, "ambari-agent start;")
+    ssh(master[0].public_dns_name, OPTS, "ambari-agent start;")
+  elif action == "deploy-blueprint":
+    (master, slave_nodes, ambari) = get_existing_cluster(
+      conn, OPTS, cluster_name, die_on_error=False)
+    wait_for_ambari_master(ambari[0])
+    upload_ambari_blueprint(ambari[0], master[0], slave_nodes)
   elif action == "destroy":
     response = raw_input("Are you sure you want to destroy the cluster " +
         cluster_name + "?\nALL DATA ON ALL NODES WILL BE LOST!!\n" +

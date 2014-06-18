@@ -1,25 +1,28 @@
 import engine
+from optparse import OptionGroup
 
 class HiveTezEngine(engine.Engine):
   name = "Hive-Tez"
   
   @classmethod
   def parser_options(cls, parser):
-    parser.add_option("--hive-tez", action="store_true", default=False,
-      help="Whether to include Hive Tez")
-    parser.add_option("--hive-tez-identity-file",
+    opt_group = OptionGroup(parser, "Hive-Tez")
+    opt_group.add_option("--hive-tez", action="store_true", default=False,
+      help="Benchmark Hive-on-Tez")
+    opt_group.add_option("--hive-tez-identity-file",
       help="SSH private key file to use for logging into Hive Tez node")
-    parser.add_option("--hive-tez-host",
+    opt_group.add_option("--hive-tez-host",
       help="Hostname of Hive Tez master node")
-    parser.add_option("--hive-tez-slaves",
+    opt_group.add_option("--hive-tez-slaves",
       help="Comma separated list of Hive Tez slaves")
+    parser.add_option_group(opt_group)
 
   @classmethod  
   def is_enabled(cls, opts):
     return opts.hive_tez
 
   def is_format_supported(self, tbl_fmt):
-    return tbl_fmt in [ 'parquet', 'orc', 'rc']
+    return tbl_fmt in [ 'parquet', 'orcfile', 'rcfile']
 
   def __init__(self, opts):
     if (opts.hive_tez_identity_file is None or 

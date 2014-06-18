@@ -1,16 +1,19 @@
 import engine
+from optparse import OptionGroup
 
 class ImpalaEngine(engine.Engine):
   name = "Impala"
 
   @classmethod  
   def parser_options(cls, parser):
-    parser.add_option("--impala", action="store_true", default=False,
-      help="Whether to include Impala")
-    parser.add_option("--impala-host",
+    opt_group = OptionGroup(parser, "Impala")
+    opt_group.add_option("--impala", action="store_true", default=False,
+      help="Benchmark Impala")
+    opt_group.add_option("--impala-host",
       help="Hostname of Impala master node")
-    parser.add_option("--impala-identity-file",
-      help="SSH private key file to use for logging into Shark node")
+    opt_group.add_option("--impala-identity-file",
+      help="SSH private key file to use for logging into Impala node")
+    parser.add_option_group(opt_group) 
 
   @classmethod  
   def is_enabled(cls, opts):
@@ -35,7 +38,7 @@ class ImpalaEngine(engine.Engine):
     self._add_aws_credentials("/etc/hadoop/conf/core-site.xml")
 
   def is_format_supported(self, tbl_fmt):
-    return tbl_fmt in [ 'parquet', 'rc']
+    return tbl_fmt in [ 'parquet', 'rcfile']
 
   def run_hql(self, query):
     self.ssh("sudo -u hdfs hive -e \"%s\"")  

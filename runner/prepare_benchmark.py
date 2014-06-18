@@ -21,7 +21,7 @@
 import subprocess
 import sys
 from sys import stderr
-from optparse import OptionParser
+from optparse import OptionParser, OptionGroup
 import os
 import time
 from pg8000 import DBAPI
@@ -50,35 +50,43 @@ BENCHMARKS = [ c
 def parse_args():
   parser = OptionParser(usage="prepare_benchmark.py [options]")
 
-  for e in ENGINES:
-    e.parser_options(parser)
-
-  for b in BENCHMARKS:
-    b.parser_options(parser)
-
   parser.add_option("-d", "--aws-key-id",
       help="Access key ID for AWS")
   parser.add_option("-k", "--aws-key",
       help="access key for aws")
 
-  parser.add_option("--setup-engine", action="store_true", default=False,
+  action_group = OptionGroup(parser, "Actions")
+  action_group.add_option("--setup-engine", action="store_true", default=False,
       help="Perform setup for the engine")
-  parser.add_option("--load-data", action="store_true", default=False,
+  action_group.add_option("--load-data", action="store_true", default=False,
       help="Copy data from S3")
-  parser.add_option("--create-schema", action="store_true", default=False,
+  action_group.add_option("--create-schema", action="store_true", default=False,
       help="Create tables, including converting formats")
-  parser.add_option("--query", action="store_true", default=False,
+  action_group.add_option("--query", action="store_true", default=False,
       help="Run the benchmarking queries")
+  parser.add_option_group(action_group)
 
-  parser.add_option("--orc-file", action="store_true", default=False,
-      help="Produce ORCFile tables")
-  parser.add_option("--rc-file", action="store_true", default=False,
-      help="Produce RCFile tables")
-  parser.add_option("--parquet", action="store_true", default=False,
-      help="Produce Parquet tables")
+  for e in ENGINES:
+    e.parser_options(parser)
 
-  parser.add_option("--benchmark-text", action="store_true", default=False,
-      help="Benchmark with text files")
+  benchmark_group = OptionGroup(parser, "Benchmarks")
+  for b in BENCHMARKS:
+    b.parser_options(benchmark_group)
+
+  parser.add_option_group(benchmark_group)
+  format_group = OptionGroup(parser, "File Formats", "Create tables and test against supported file types")
+
+  format_group.add_option("--orc-file", action="store_true", default=False,
+      help="Produce and test against ORCFile tables")
+  format_group.add_option("--rc-file", action="store_true", default=False,
+      help="Produce and test against RCFile tables")
+  format_group.add_option("--parquet", action="store_true", default=False,
+      help="Produce and test agaisnt Parquet tables")
+
+  format_group.add_option("--benchmark-text", action="store_true", default=False,
+      help="Run benchmarks with the source text files")
+
+  parser.add_option_group(format_group)
 
   (opts, args) = parser.parse_args()
 
@@ -153,20 +161,20 @@ def main():
       for engine in engines:
         if opts.benchmark_text:
           print ("Running %s on %s (plain-text)" % (benchmark.name, engine.name))
-          benchmark.run_test(engine, "")
+          benchmark.run_test(engine, "text")
         if opts.parquet:
           if engine.is_format_supported(engine, "parquet"):
             benchmark.run_test(engine, "parquet")          
           else:
             print ("Skipping %s on %s (parquet is not supported)" % (benchmark.name, engine.name))
         if opts.orc_file:
-          if engine.is_format_supported(engine, "orc"):
-            benchmark.run_test(engine, "orc")          
+          if engine.is_format_supported(engine, "orcfile"):
+            benchmark.run_test(engine, "orcfile")          
           else:
             print ("Skipping %s on %s (ORCFile is not supported)" % (benchmark.name, engine.name))
         if opts.rc_file:
-          if engine.is_format_supported(engine, "rc"):
-            benchmark.run_test(engine, "rc")          
+          if engine.is_format_supported(engine, "rcfile"):
+            benchmark.run_test(engine, "rcfile")          
           else:
             print ("Skipping %s on %s (RCFile is not supported)" % (benchmark.name, engine.name))
 
