@@ -133,6 +133,12 @@ QUERY_MAP = {
                     create_as(QUERY_3c_SQL)),
              '4':  (QUERY_4_HQL, None, None)}
 
+for q in QUERY_MAP:
+  with open("benchmark/queries/intelhadoop/query-%s.hql" % q, 'w') as f:
+    for line in xrange(2):
+      print >> f, QUERY_MAP[q][line]
+
+exit()
 # Turn a given query into a version using cached tables
 def make_input_cached(query):
   return query.replace("uservisits", "uservisits_cached") \
@@ -291,7 +297,7 @@ def run_shark_benchmark(opts):
     def convert_to_cached(query):
       return (make_output_cached(make_input_cached(query[0])), )
 
-    local_query_map = {k: convert_to_cached(v) for k, v in QUERY_MAP.items()}
+    #local_query_map = {k: convert_to_cached(v) for k, v in QUERY_MAP.items()}
 
     # Set up cached tables
     if '4' in opts.query_num:

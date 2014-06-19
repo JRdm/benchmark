@@ -31,11 +31,9 @@ class IntelHadoopBenchmark(benchmark.Benchmark):
                          "/tmp/benchmark/scratch/")
 
   def run_test(self, engine, table_suffix, iterations=3):
-    if table_suffix != '':
-      table_suffix = '-%s' % table_suffix
 
     for q in QUERIES:
-      script = "%s/query-%s%s.hql" % (QUERY_FILE_ROOT, q, table_suffix)
+      script = "%s/%s/query-%s.hql" % (QUERY_FILE_ROOT, table_suffix, q)
       print "Running script %s" % script
       engine.run_bench_query(script, iterations) 
 
