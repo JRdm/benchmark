@@ -463,8 +463,8 @@ def setup_cluster(conn, master_nodes, slave_nodes, ambari_nodes, OPTS, deploy_ss
     'cluster' : cluster_name,
   }
 
-  wait_for_ambari_master(ambari[0])
-  upload_ambari_blueprint(ambari[0], master_nodes[0], slave_nodes)
+  wait_for_ambari_master(ambari)
+  upload_ambari_blueprint(ambari, master, slave_nodes)
 
   print "Ambari: %s" % ambari.public_dns_name
   print "Master: %s" % master.public_dns_name
