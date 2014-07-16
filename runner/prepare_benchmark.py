@@ -101,7 +101,10 @@ def parse_args():
                 if b.is_enabled(opts)  
           ]  
   
-  if (len(under_test) == 0 or len(tests) == 0):
+  if len(under_test) == 0:
+    print 'No engines chosen to test!'
+
+  if len(under_test) == 0:
     parser.print_help()
     sys.exit(1)
 

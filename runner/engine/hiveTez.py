@@ -34,41 +34,20 @@ class HiveTezEngine(engine.Engine):
     self.host = opts.hive_tez_host
     self.aws_key_id = opts.aws_key_id
     self.aws_key = opts.aws_key
+    self.slaves = opts.hive_tez_slaves.split(',')
     self.username = "root"
 
   def setup_env(self):
-    cmd = """
-    yum install -y git
-    git clone https://github.com/ahirreddy/benchmark.git
-    cd benchmark/runner/tez
-  
-    cp -r tez-0.2.0.2.1.0.0-92 /opt
-    HADOOP_USER_NAME=hdfs hadoop fs -mkdir -p /apps/tez
-    HADOOP_USER_NAME=hdfs hadoop fs -chmod 755 /apps/tez
-    HADOOP_USER_NAME=hdfs hadoop fs -copyFromLocal /opt/tez-0.2.0.2.1.0.0-92/* /apps/tez/
-  
-    cp -r apache-hive-0.13.0.2.1.0.0-92-bin /opt
-    HADOOP_USER_NAME=hive hadoop fs -mkdir -p /user/hive
-    HADOOP_USER_NAME=hive hadoop fs -chmod 755 /user/hive
-    HADOOP_USER_NAME=hive hadoop fs -put /opt/apache-hive-0.13.0.2.1.0.0-92-bin/lib/hive-exec-*.jar /user/hive/hive-exec-0.13.0-SNAPSHOT.jar
-  
-    cd Stinger-Preview-Quickstart
-    cp configs/tez-site.xml.physical /etc/hadoop/conf/tez-site.xml
-    cp /etc/hive/conf.server/hive-site.xml /opt/apache-hive-0.13.0.2.1.0.0-92-bin/conf/hive-site.xml
-  
-    wget http://private-repo-1.hortonworks.com/HDP-2.1.0.0/repos/centos6/hdp.repo -O /etc/yum.repos.d/stinger.repo
-    yum upgrade hadoop-yarn-resourcemanager
-    """
-
-    self.ssh(cmd)
+    self.add_aws_credentials('/etc/hadoop/conf/core-site.xml')
 
   def run_bench_query(self, script_file, executions):
     results = []
     self.scp_to(script_file, "/tmp/bench_query.hql") 
     for f in xrange(executions):
-      self.ssh('HIVE_HOME=/opt/apache-hive-0.13.0.2.1.0.0-92-bin HIVE_CONF_DIR=$HIVE_HOME/conf PATH=$HIVE_HOME/bin:$PATH HADOOP_CLASSPATH=/opt/tez-0.2.0.2.1.0.0-92/*:/opt/tez-0.2.0.2.1.0.0-92/lib/* HADOOP_USER_CLASSPATH_FIRST=true HADOOP_USER_NAME=hdfs /opt/apache-hive-0.13.0.2.1.0.0-92-bin/bin/hive -i /root/benchmark/runner/tez/Stinger-Preview-Quickstart/configs/stinger.settings -hiveconf hive.optimize.tez=true -f /tmp/bench_query.hql 2>&1 | grep "Time taken" | sed "s/Time taken:\([0-9.]*\) seconds/\\\\1/" >> /tmp/result.csv')
+      self.ssh_master('HIVE_HOME=/opt/apache-hive-0.13.0.2.1.0.0-92-bin HIVE_CONF_DIR=$HIVE_HOME/conf PATH=$HIVE_HOME/bin:$PATH HADOOP_CLASSPATH=/opt/tez-0.2.0.2.1.0.0-92/*:/opt/tez-0.2.0.2.1.0.0-92/lib/* HADOOP_USER_CLASSPATH_FIRST=true HADOOP_USER_NAME=hdfs /opt/apache-hive-0.13.0.2.1.0.0-92-bin/bin/hive -i /root/benchmark/runner/tez/Stinger-Preview-Quickstart/configs/stinger.settings -hiveconf hive.optimize.tez=true -f /tmp/bench_query.hql 2>&1 | grep "Time taken" | sed "s/Time taken:\([0-9.]*\) seconds/\\\\1/" >> /tmp/result.csv')
+      self.ssh_slaves('sudo sync && sudo echo 3 > /proc/sys/vm/drop_caches')
     self.scp_from("result.csv", "/tmp/result.csv")
-    self.ssh("rm /tmp/result.csv")
+    self.ssh_master("rm /tmp/result.csv")
     with open("result.csv") as f:
       for line in f:
          print line 

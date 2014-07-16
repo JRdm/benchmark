@@ -27,6 +27,7 @@ class SharkEngine(engine.Engine):
   def __init__(self, opts):
     if (opts.shark_identity_file is None or 
         opts.shark_host is None or
+        opts.shark_slaves is None or
         opts.aws_key_id is None or
         opts.aws_key is None):
       raise Exception("Shark requires identity file, hostname, slaves and AWS creds")
@@ -34,6 +35,7 @@ class SharkEngine(engine.Engine):
     self.host = opts.shark_host
     self.aws_key_id = opts.aws_key_id
     self.aws_key = opts.aws_key
+    slef.slaves = opts.shark_slaves.split(',')
     self.username = "root"
 
   def setup_env(self):
@@ -62,7 +64,8 @@ class SharkEngine(engine.Engine):
     results = []
     self.scp_to(script_file, "/tmp/bench_query.hql") 
     for f in xrange(executions):
-      self.ssh('HIVE_HOME=/opt/apache-hive-0.13.0.2.1.0.0-92-bin HIVE_CONF_DIR=$HIVE_HOME/conf PATH=$HIVE_HOME/bin:$PATH HADOOP_CLASSPATH=/opt/tez-0.2.0.2.1.0.0-92/*:/opt/tez-0.2.0.2.1.0.0-92/lib/* HADOOP_USER_CLASSPATH_FIRST=true HADOOP_USER_NAME=hdfs /opt/apache-hive-0.13.0.2.1.0.0-92-bin/bin/hive -i /root/benchmark/runner/tez/Stinger-Preview-Quickstart/configs/stinger.settings -hiveconf hive.optimize.tez=true -f /tmp/bench_query.hql 2>&1 | grep "Time taken" | sed "s/Time taken:\([0-9.]*\) seconds/\\\\1/" >> /tmp/result.csv')
+      self.ssh_master('HIVE_HOME=/opt/apache-hive-0.13.0.2.1.0.0-92-bin HIVE_CONF_DIR=$HIVE_HOME/conf PATH=$HIVE_HOME/bin:$PATH HADOOP_CLASSPATH=/opt/tez-0.2.0.2.1.0.0-92/*:/opt/tez-0.2.0.2.1.0.0-92/lib/* HADOOP_USER_CLASSPATH_FIRST=true HADOOP_USER_NAME=hdfs /opt/apache-hive-0.13.0.2.1.0.0-92-bin/bin/hive -i /root/benchmark/runner/tez/Stinger-Preview-Quickstart/configs/stinger.settings -hiveconf hive.optimize.tez=true -f /tmp/bench_query.hql 2>&1 | grep "Time taken" | sed "s/Time taken:\([0-9.]*\) seconds/\\\\1/" >> /tmp/result.csv')
+      self.ssh_slaves('sudo sync && sudo echo 3 > /proc/sys/vm/drop_caches')
     self.scp_from("result.csv", "/tmp/result.csv")
     self.ssh("rm /tmp/result.csv")
     with open("result.csv") as f:

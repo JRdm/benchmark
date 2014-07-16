@@ -35,6 +35,7 @@ class HiveEngine(engine.Engine):
     self.host = opts.hive_host
     self.aws_key_id = opts.aws_key_id
     self.aws_key = opts.aws_key
+    self.slaves = opts.hive_slaves.split(',')
     self.username = "root"
 
   def setup_env(self):
