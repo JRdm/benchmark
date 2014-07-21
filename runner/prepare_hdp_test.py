@@ -30,21 +30,17 @@ import sys
 import tempfile
 import time
 import urllib2
-import requests
 import threading
-import json
 from optparse import OptionParser
 from sys import stderr
 import boto
 from boto.ec2.blockdevicemapping import BlockDeviceMapping, BlockDeviceType
 from boto import ec2
-from cm_api.api_client import ApiResource
-from cm_helper import ClouderaCluster
- 
+
 # Configure and parse our command-line arguments
 def parse_args():
-  parser = OptionParser(usage="prepare_cm.py [options] <action> <cluster_name>"
-      + "\n\n<action> can be: launch, resume-setup, info, cm-start, deploy-blueprint, destroy",
+  parser = OptionParser(usage="spark-ec2 [options] <action> <cluster_name>"
+      + "\n\n<action> can be: launch, destroy, login, stop, start, get-master",
       add_help_option=False)
   parser.add_option("-h", "--help", action="help",
                     help="Show this help message and exit")
@@ -69,6 +65,19 @@ def parse_args():
            "between zones applies)")
   parser.add_option("-a", "--ami", help="Amazon Machine Image ID to use",
                     default="ami-a25415cb")
+  parser.add_option("-v", "--spark-version", default="0.8.0",
+      help="Version of Spark to use: 'X.Y.Z' or a specific git hash")
+  parser.add_option("--spark-git-repo", 
+      default="https://github.com/mesos/spark", 
+      help="Github repo from which to checkout supplied commit hash")
+  parser.add_option("--hadoop-major-version", default="1",
+      help="Major version of Hadoop (default: 1)")
+  parser.add_option("-D", metavar="[ADDRESS:]PORT", dest="proxy_port", 
+      help="Use SSH dynamic port forwarding to create a SOCKS proxy at " +
+            "the given local address (for use with login)")
+  parser.add_option("--resume", action="store_true", default=False,
+      help="Resume installation on a previously launched cluster " +
+           "(for debugging)")
   parser.add_option("--ebs-vol-size", metavar="SIZE", type="int", default=0,
       help="Attach a new EBS volume of size SIZE (in GB) to each node as " +
            "/vol. The volumes will be deleted when the instances terminate. " +
@@ -81,8 +90,10 @@ def parse_args():
   parser.add_option("--ganglia", action="store_true", default=True,
       help="Setup Ganglia monitoring on cluster (default: on). NOTE: " +
            "the Ganglia page will be publicly accessible")
-  parser.add_option("-u", "--user", default="ec2-user",
-      help="The SSH user you want to connect as (default: ec2-user)")
+  parser.add_option("--no-ganglia", action="store_false", dest="ganglia",
+      help="Disable Ganglia monitoring for the cluster")
+  parser.add_option("-u", "--user", default="root",
+      help="The SSH user you want to connect as (default: root)")
   parser.add_option("--delete-groups", action="store_true", default=False,
       help="When destroying a cluster, delete the security groups that were created")
 
@@ -149,26 +160,26 @@ def launch_cluster(conn, OPTS, cluster_name):
   print "Setting up security groups..."
   master_group = get_or_make_group(conn, cluster_name + "-master")
   slave_group = get_or_make_group(conn, cluster_name + "-slaves")
-  cm_group = get_or_make_group(conn, cluster_name + "-cm")
+  ambari_group = get_or_make_group(conn, cluster_name + "-ambari")
 
   if master_group.rules == []: # Group was just now created
     master_group.authorize(src_group=master_group)
     master_group.authorize(src_group=slave_group)
-    master_group.authorize(src_group=cm_group)
+    master_group.authorize(src_group=ambari_group)
     # TODO: Currently Group is completely open
     master_group.authorize('tcp', 0, 65535, '0.0.0.0/0')
   if slave_group.rules == []: # Group was just now created
     slave_group.authorize(src_group=master_group)
     slave_group.authorize(src_group=slave_group)
-    slave_group.authorize(src_group=cm_group)
+    slave_group.authorize(src_group=ambari_group)
     # TODO: Currently Group is completely open
     slave_group.authorize('tcp', 0, 65535, '0.0.0.0/0')
-  if cm_group.rules == []: # Group was just now created
-    cm_group.authorize(src_group=master_group)
-    cm_group.authorize(src_group=slave_group)
-    cm_group.authorize(src_group=cm_group)
+  if ambari_group.rules == []: # Group was just now created
+    ambari_group.authorize(src_group=master_group)
+    ambari_group.authorize(src_group=slave_group)
+    ambari_group.authorize(src_group=ambari_group)
     # TODO: Currently Group is completely open
-    cm_group.authorize('tcp', 0, 65535, '0.0.0.0/0')
+    ambari_group.authorize('tcp', 0, 65535, '0.0.0.0/0')
 
   # Check if instances are already running in our groups
   if OPTS.resume:
@@ -190,9 +201,6 @@ def launch_cluster(conn, OPTS, cluster_name):
 
     # Create block device mapping so that we can add an EBS volume if asked to
     block_map = BlockDeviceMapping()
-    root_volume = BlockDeviceType()
-    root_volume.size=30
-    block_map["/dev/sda1"]=root_volume
     device = BlockDeviceType()
     device.ephemeral_name = 'ephemeral0'
     device.delete_on_termination = True
@@ -207,18 +215,18 @@ def launch_cluster(conn, OPTS, cluster_name):
       num_zones = len(zones)
       i = 0
       my_req_ids = []
-      cm_req_ids = []
+      ambari_req_ids = []
       master_req_ids = []
       for zone in zones:
         num_slaves_this_zone = get_partition(OPTS.slaves, num_zones, i)
-        cm_reqs = conn.request_spot_instances(
+        ambari_reqs = conn.request_spot_instances(
             price = OPTS.spot_price,
             image_id = OPTS.ami,
             launch_group = "launch-group-%s" % cluster_name,
             placement = zone,
             count = 1,
             key_name = OPTS.key_pair,
-            security_groups = [cm_group],
+            security_groups = [ambari_group],
             instance_type = OPTS.master_instance_type,
             block_device_map = block_map)
         master_reqs = conn.request_spot_instances(
@@ -242,7 +250,7 @@ def launch_cluster(conn, OPTS, cluster_name):
             instance_type = OPTS.instance_type,
             block_device_map = block_map)
         my_req_ids += [req.id for req in slave_reqs]
-        cm_req_ids += [req.id for req in cm_reqs]
+        ambari_req_ids += [req.id for req in ambari_reqs]
         master_req_ids += [req.id for req in master_reqs]
         i += 1
 
@@ -255,7 +263,7 @@ def launch_cluster(conn, OPTS, cluster_name):
           for r in reqs:
             id_to_req[r.id] = r
           active_instance_ids = []
-          cm_instance_ids = []
+          ambari_instance_ids = []
           master_instance_ids = []
           for i in my_req_ids:
             if i in id_to_req and id_to_req[i].state == "active":
@@ -263,20 +271,20 @@ def launch_cluster(conn, OPTS, cluster_name):
           for i in master_req_ids:
             if i in id_to_req and id_to_req[i].state == "active":
               master_instance_ids.append(id_to_req[i].instance_id)
-          for i in cm_req_ids:
+          for i in ambari_req_ids:
             if i in id_to_req and id_to_req[i].state == "active":
-              cm_instance_ids.append(id_to_req[i].instance_id)
-          if len(active_instance_ids) == OPTS.slaves and len(master_instance_ids) == 1 and len(cm_instance_ids) == 1:
+              ambari_instance_ids.append(id_to_req[i].instance_id)
+          if len(active_instance_ids) == OPTS.slaves and len(master_instance_ids) == 1 and len(ambari_instance_ids) == 1:
             print "All %d slaves granted" % OPTS.slaves
             slave_nodes = []
             master_nodes = []
-            cm_nodes = []
+            ambari_nodes = []
             for r in conn.get_all_instances(active_instance_ids):
               slave_nodes += r.instances
             for r in conn.get_all_instances(master_instance_ids):
               master_nodes += r.instances
-            for r in conn.get_all_instances(cm_instance_ids):
-              cm_nodes += r.instances
+            for r in conn.get_all_instances(ambari_instance_ids):
+              ambari_nodes += r.instances
             break
           else:
             print "%d of %d slaves granted, waiting longer" % (
@@ -286,9 +294,9 @@ def launch_cluster(conn, OPTS, cluster_name):
         print "Canceling spot instance requests"
         conn.cancel_spot_instance_requests(my_req_ids)
         # Log a warning if any of these requests actually launched instances:
-        (master_nodes, slave_nodes, cm_nodes) = get_existing_cluster(
+        (master_nodes, slave_nodes, ambari_nodes) = get_existing_cluster(
             conn, OPTS, cluster_name, die_on_error=False)
-        running = len(master_nodes) + len(slave_nodes) + len(cm_nodes)
+        running = len(master_nodes) + len(slave_nodes) + len(ambari_nodes)
         if running:
           print >> stderr, ("WARNING: %d instances are still running" % running)
         sys.exit(0)
@@ -329,23 +337,23 @@ def launch_cluster(conn, OPTS, cluster_name):
       master_nodes = master_res.instances
       print "Launched master in %s, regid = %s" % (zone, master_res.id)
 
-      cm_type = OPTS.master_instance_type
-      if cm_type == "":
-        cm_type = OPTS.instance_type
+      ambari_type = OPTS.master_instance_type
+      if ambari_type == "":
+        ambari_type = OPTS.instance_type
       if OPTS.zone == 'all':
         OPTS.zone = random.choice(conn.get_all_zones()).name
-      cm_res = image.run(key_name = OPTS.key_pair,
-                            security_groups = [cm_group],
-                            instance_type = cm_type,
+      ambari_res = image.run(key_name = OPTS.key_pair,
+                            security_groups = [ambari_group],
+                            instance_type = ambari_type,
                             placement = OPTS.zone,
                             min_count = 1,
                             max_count = 1,
                             block_device_map = block_map)
-      cm_nodes = cm_res.instances
-      print "Launched cm in %s, regid = %s" % (zone, cm_res.id)
+      ambari_nodes = ambari_res.instances
+      print "Launched ambari in %s, regid = %s" % (zone, ambari_res.id)
 
     # Return all the instances
-    return (master_nodes, slave_nodes, cm_nodes)
+    return (master_nodes, slave_nodes, ambari_nodes)
 
 
 # Get the EC2 instances in an existing cluster if available.
@@ -355,7 +363,7 @@ def get_existing_cluster(conn, OPTS, cluster_name, die_on_error=True):
   reservations = conn.get_all_instances()
   master_nodes = []
   slave_nodes = []
-  cm_nodes = []
+  ambari_nodes = []
   for res in reservations:
     active = [i for i in res.instances if is_active(i)]
     if len(active) > 0:
@@ -364,23 +372,24 @@ def get_existing_cluster(conn, OPTS, cluster_name, die_on_error=True):
         master_nodes += res.instances
       elif group_names == [cluster_name + "-slaves"]:
         slave_nodes += res.instances
-      elif group_names == [cluster_name + "-cm"]:
-        cm_nodes += res.instances
-  if any((master_nodes, slave_nodes, cm_nodes)):
-    print ("Found %d master(s), %d slaves, %d cm" %
-           (len(master_nodes), len(slave_nodes), len(cm_nodes)))
-  if (master_nodes != [] and slave_nodes != [] and cm_nodes != []) or not die_on_error:
-    return (master_nodes, slave_nodes, cm_nodes)
+      elif group_names == [cluster_name + "-ambari"]:
+        ambari_nodes += res.instances
+  if any((master_nodes, slave_nodes, ambari_nodes)):
+    print ("Found %d master(s), %d slaves, %d ambari" %
+           (len(master_nodes), len(slave_nodes), len(ambari_nodes)))
+  if (master_nodes != [] and slave_nodes != [] and ambari_nodes != []) or not die_on_error:
+    return (master_nodes, slave_nodes, ambari_nodes)
   else:
     print "ERROR: Could not find any existing cluster"
     sys.exit(1)
 
+
 # Deploy configuration files and run setup scripts on a newly launched
 # or started EC2 cluster.
-def setup_cluster(conn, master_nodes, slave_nodes, cm_nodes, OPTS, deploy_ssh_key, cluster_name):
+def setup_cluster(conn, master_nodes, slave_nodes, ambari_nodes, OPTS, deploy_ssh_key, cluster_name):
   master = master_nodes[0]
-  cm = cm_nodes[0]
-  all_nodes = master_nodes + slave_nodes + cm_nodes
+  ambari = ambari_nodes[0]
+  all_nodes = master_nodes + slave_nodes + ambari_nodes
 
   print "Enabling root on all nodes..."
   OPTS.user = "ec2-user"
@@ -388,32 +397,30 @@ def setup_cluster(conn, master_nodes, slave_nodes, cm_nodes, OPTS, deploy_ssh_ke
 
   OPTS.user = "root"
 
-  print "Copying SSH key %s to cm & master..." % OPTS.identity_file
-  concurrent_map(deploy_key, (cm, master))
+  print "Copying SSH key %s to ambari & master..." % OPTS.identity_file
+  concurrent_map(deploy_key, (ambari, master))
 
   print "Configuring Nodes..."
   concurrent_map(configure_node, all_nodes)
 
-  wait_for_cluster(conn, 90, master_nodes, slave_nodes, cm_nodes)
+  wait_for_cluster(conn, 90, master_nodes, slave_nodes, ambari_nodes)
 
-  print "Setting up cm node..."
-  setup_cm_master(cm, OPTS)
-
-  print "Setting up cm agent on master..."
-  setup_cm_slave(cm, master, OPTS)
-
-  print "Setting up cm agent on slaves..."
-  for slave in slave_nodes:
-
-    print "Slave: %s" % slave.public_dns_name
-    setup_cm_slave(cm, slave, OPTS)
+  print "Setting up ambari node..."
+  setup_ambari_master(ambari, OPTS)
 
   print "Starting All Services..."
   concurrent_map(start_services, master_nodes + slave_nodes)
 
-  wait_for_cm_master(cm)
+  args = {
+    'runner' : '/Users/ahirreddy/Work/benchmark/spark-0.8.0-incubating/ec2/spark-ec2',
+    'keyname' : OPTS.key_pair,
+    'idfile' : OPTS.identity_file,
+    'cluster' : cluster_name,
+  }
 
-  print "Cloudera Manager: %s" % cm.public_dns_name
+  ssh(ambari.public_dns_name, OPTS, "ambari-server start;")
+
+  print "Ambari: %s" % ambari.public_dns_name
   print "Master: %s" % master.public_dns_name
   for slave in slave_nodes:
     print "Slave: %s" % slave.public_dns_name
@@ -456,73 +463,44 @@ def start_services(node):
 
   return ssh(node.public_dns_name, OPTS, cmd)
 
-# Deploy private key to cm and master nodes
+# Deploy private key to ambari and master nodes
 def deploy_key(node):
     ssh(node.public_dns_name, OPTS, 'mkdir -p ~/.ssh')
     scp(node.public_dns_name, OPTS, OPTS.identity_file, '~/.ssh/id_rsa')
 
     ssh(node.public_dns_name, OPTS, 'chmod 600 ~/.ssh/id_rsa')
 
-# Setup the Cloudera Manager master and start the server
-def setup_cm_master(cm, OPTS):
+# Setup the Ambari Master and start the ambari server
+# TODO: Find a way to completely automate, currently user has to interact
+# with install process
+def setup_ambari_master(ambari, OPTS):
   cmd = """
-        wget http://archive.cloudera.com/cm5/redhat/6/x86_64/cm/cloudera-manager.repo;
-        sudo mv cloudera-manager.repo /etc/yum.repos.d/;
-        sudo yum clean -y all; 
-        sudo yum install -y jdk cloudera-manager-server cloudera-manager-daemons cloudera-manager-server-db-2;
-        sudo service cloudera-scm-server-db start;
-        sudo service cloudera-scm-server start;
+        wget http://public-repo-1.hortonworks.com/ambari/centos6/1.x/updates/1.4.1.25/ambari.repo;
+        cp ambari.repo /etc/yum.repos.d;
+        yum -y install epel-release;
+        yum -y repolist;
+        yum -y install ambari-server;
+        ambari-server setup <<-END
+n
+n
+y
+END
+        ambari-server start;
+        ambari-server status;
         """
-  ssh(cm.public_dns_name, OPTS, cmd, stdin=None)
+  ssh(ambari.public_dns_name, OPTS, cmd, stdin=None)
 
-# Setup the CM Slave and start the CM agent
-def setup_cm_slave(cm, slave, OPTS):
-  cmd = """
-        wget http://archive.cloudera.com/cm5/redhat/6/x86_64/cm/cloudera-manager.repo;
-        sudo mv cloudera-manager.repo /etc/yum.repos.d/;
-        sudo yum clean -y all; 
-        sudo yum install -y jdk cloudera-manager-agent cloudera-manager-daemons mysql-java-connector;
-        sudo sed -i.bak "s/^server_host.*/server_host=%s/" /etc/cloudera-scm-agent/config.ini;
-        sudo service cloudera-scm-agent start;
-        """ % (cm.private_dns_name)
-  ssh(slave.public_dns_name, OPTS, cmd, stdin=None)
-
-# Deploy the services using CM
-def deploy_services(cm, master, slaves, OPTS={}):
-  slave_dns = [ n.private_dns_name for n in slaves ]
-  cluster = ClouderaCluster()
-  cluster.set_hosts(cm.private_dns_name, master.private_dns_name, slave_dns)
-  cluster.create_cluster(cm.public_dns_name)
-  cluster.deploy_management()
-  cluster.deploy_zookeeper ()
-  cluster.deploy_hdfs ()
-  cluster.deploy_yarn()
-  cluster.deploy_hive()
-  cluster.deploy_impala() 
-  cluster.cluster.stop().wait()
-  cluster.cluster.start().wait()
 
 # Wait for a whole cluster (masters, slaves and ZooKeeper) to start up
-def wait_for_cluster(conn, wait_secs, master_nodes, slave_nodes, cm_nodes):
+def wait_for_cluster(conn, wait_secs, master_nodes, slave_nodes, ambari_nodes):
   print "Waiting for instances to start up..."
   time.sleep(5)
   wait_for_instances(conn, master_nodes)
   wait_for_instances(conn, slave_nodes)
-  wait_for_instances(conn, cm_nodes)
+  wait_for_instances(conn, ambari_nodes)
   print "Waiting %d more seconds..." % wait_secs
   time.sleep(wait_secs)
 
-def wait_for_cm_master(cm):
-  print "Waiting for Cloudera Manager to start"
-  while True:
-    try:
-      r = requests.get("http://%s:7180/" % (cm.public_dns_name))
-      print "Got Cloudera Manager"
-      return
-    except Exception,e :
-      print e
-      print "Server unavailable, waiting 10 seconds"
-      time.sleep(10)
 
 # Copy a file to a given host through scp, throwing an exception if scp fails
 def scp(host, OPTS, local_file, dest_file):
@@ -540,9 +518,9 @@ def scp_download(host, OPTS, remote_file, local_file):
 
 # Run a command on a host through ssh, retrying up to two times
 # and then throwing an exception if ssh continues to fail.
-def ssh(host, OPTS, command, stdin=open(os.devnull, 'w'), flags="-t -t"):
+def ssh(host, OPTS, command, stdin=open(os.devnull, 'w')):
   command = command.replace('\n', ' ')
-  cmd = "ssh %s -o StrictHostKeyChecking=no -i %s %s@%s '%s'" % (flags, OPTS.identity_file, OPTS.user, host, command)
+  cmd = "ssh -t -t -o StrictHostKeyChecking=no -i %s %s@%s '%s'" % (OPTS.identity_file, OPTS.user, host, command)
   print cmd
   tries = 0
   while True:
@@ -573,6 +551,7 @@ def get_partition(total, num_partitions, current_partitions):
     num_slaves_this_zone += 1
   return num_slaves_this_zone
 
+
 def main():
   global OPTS
   (OPTS, action, cluster_name) = parse_args()
@@ -587,19 +566,13 @@ def main():
     OPTS.zone = random.choice(conn.get_all_zones()).name
 
   if action == "launch":
-    (master_nodes, slave_nodes, cm_nodes) = launch_cluster(conn, OPTS, cluster_name)
-    wait_for_cluster(conn, OPTS.wait, master_nodes, slave_nodes, cm_nodes)
-    setup_cluster(conn, master_nodes, slave_nodes, cm_nodes, OPTS, True, cluster_name)
-    deploy_services(cm_nodes[0], master_nodes[0], slave_nodes)
-  elif action == "resume-setup":
-    (master, slave_nodes, cm) = get_existing_cluster(
-      conn, OPTS, cluster_name, die_on_error=False)
-    setup_cluster(conn, master, slave_nodes, cm, OPTS, True, cluster_name)
-    deploy_services(cm[0], master[0], slave_nodes)
+    (master_nodes, slave_nodes, ambari_nodes) = launch_cluster(conn, OPTS, cluster_name)
+    wait_for_cluster(conn, OPTS.wait, master_nodes, slave_nodes, ambari_nodes)
+    setup_cluster(conn, master_nodes, slave_nodes, ambari_nodes, OPTS, True, cluster_name)
   elif action == "info":
-    (master, slave_nodes, cm) = get_existing_cluster(
+    (master, slave_nodes, ambari) = get_existing_cluster(
       conn, OPTS, cluster_name, die_on_error=False)
-    print "cm: %s" % cm[0].public_dns_name
+    print "Ambari: %s" % ambari[0].public_dns_name
     print "Master: %s" % master[0].public_dns_name
     for slave in slave_nodes:
       print "Slave: %s" % slave.public_dns_name
@@ -607,27 +580,20 @@ def main():
     print "Slaves:"
     for slave in slave_nodes:
       print slave.private_dns_name
-  elif action == "cm-start":
-    (master, slave_nodes, cm) = get_existing_cluster(
+  elif action == "ambari-start":
+    (master, slave_nodes, ambari) = get_existing_cluster(
       conn, OPTS, cluster_name, die_on_error=False)
-    ssh(cm[0].public_dns_name, OPTS, "sudo service cloudera-scm-server start; sleep 10; service cloudera-scm-server status;")
-    for f in slave_nodes:
-      ssh(f.public_dns_name, OPTS, "sudo service cloudera-scm-agent start;")
-    ssh(master[0].public_dns_name, OPTS, "sudo service cloudera-scm-agent start;")
-  elif action == "deploy-blueprint":
-    (master, slave_nodes, cm) = get_existing_cluster(
-      conn, OPTS, cluster_name, die_on_error=False)
-    wait_for_cm_master(cm[0])
-    deploy_services(cm[0], master[0], slave_nodes)
+    print ambari[0].public_dns_name
+    ssh(ambari[0].public_dns_name, OPTS, "ambari-server start; ambari-server status;")
   elif action == "destroy":
     response = raw_input("Are you sure you want to destroy the cluster " +
         cluster_name + "?\nALL DATA ON ALL NODES WILL BE LOST!!\n" +
         "Destroy cluster " + cluster_name + " (y/N): ")
     if response == "y":
-      (cm_nodes, master_nodes, slave_nodes) = get_existing_cluster(
+      (ambari_nodes, master_nodes, slave_nodes) = get_existing_cluster(
           conn, OPTS, cluster_name, die_on_error=False)
-      print "Terminating cm..."
-      for inst in cm_nodes:
+      print "Terminating ambari..."
+      for inst in ambari_nodes:
         inst.terminate()
       print "Terminating master..."
       for inst in master_nodes:

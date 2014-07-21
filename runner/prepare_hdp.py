@@ -41,8 +41,8 @@ from boto import ec2
 
 # Configure and parse our command-line arguments
 def parse_args():
-  parser = OptionParser(usage="spark-ec2 [options] <action> <cluster_name>"
-      + "\n\n<action> can be: launch, destroy, login, stop, start, get-master",
+  parser = OptionParser(usage="deploy_hdp.py [options] <action> <cluster_name>"
+      + "\n\n<action> can be: launch, ambari-start, deploy-blueprint, destroy",
       add_help_option=False)
   parser.add_option("-h", "--help", action="help",
                     help="Show this help message and exit")
@@ -67,19 +67,6 @@ def parse_args():
            "between zones applies)")
   parser.add_option("-a", "--ami", help="Amazon Machine Image ID to use",
                     default="ami-a25415cb")
-  parser.add_option("-v", "--spark-version", default="0.8.0",
-      help="Version of Spark to use: 'X.Y.Z' or a specific git hash")
-  parser.add_option("--spark-git-repo", 
-      default="https://github.com/mesos/spark", 
-      help="Github repo from which to checkout supplied commit hash")
-  parser.add_option("--hadoop-major-version", default="1",
-      help="Major version of Hadoop (default: 1)")
-  parser.add_option("-D", metavar="[ADDRESS:]PORT", dest="proxy_port", 
-      help="Use SSH dynamic port forwarding to create a SOCKS proxy at " +
-            "the given local address (for use with login)")
-  parser.add_option("--resume", action="store_true", default=False,
-      help="Resume installation on a previously launched cluster " +
-           "(for debugging)")
   parser.add_option("--ebs-vol-size", metavar="SIZE", type="int", default=0,
       help="Attach a new EBS volume of size SIZE (in GB) to each node as " +
            "/vol. The volumes will be deleted when the instances terminate. " +
@@ -92,8 +79,6 @@ def parse_args():
   parser.add_option("--ganglia", action="store_true", default=True,
       help="Setup Ganglia monitoring on cluster (default: on). NOTE: " +
            "the Ganglia page will be publicly accessible")
-  parser.add_option("--no-ganglia", action="store_false", dest="ganglia",
-      help="Disable Ganglia monitoring for the cluster")
   parser.add_option("-u", "--user", default="root",
       help="The SSH user you want to connect as (default: root)")
   parser.add_option("--delete-groups", action="store_true", default=False,

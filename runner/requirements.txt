@@ -2,6 +2,7 @@ astroid==1.1.1
 boto==2.31.1
 cm-api==6.0.2
 logilab-common==0.62.0
+pg8000==1.9.11
 pylint==1.2.1
 readline==6.2.4.1
 requests==2.3.0
