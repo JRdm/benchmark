@@ -17,4 +17,4 @@ The framework aims to support:
 
 Engine support is currently in development.
 
-
+See runner/README.md for more details about how to run the scripts.
