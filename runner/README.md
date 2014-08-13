@@ -3,7 +3,7 @@ Big Data Benchmark Scripts
 
 Collection of scripts to create HDP and CDH clusters on EC2 and run benchmarks.
 
-All of the scripts require some Python dependencies. These are in requirements.txt, so you can `pip install -r requirements.txt`
+All of the scripts require some Python dependencies. These are in requirements.txt, so you can `pip install -r requirements.txt`. Note that the scripts are setup to use i2.xlarge instances specifically - block device configuration will change across difference instance types. If you use the defaults you don't need to worry about this.
 
 Creating Clusters
 --------
@@ -13,11 +13,11 @@ To create a CDH cluster, use `prepare_cm.py`, for HDP use `prepare_hdp.py`. They
 ```
 export AWS_ACCESS_KEY_ID=<AWS ACCESS KEY ID>
 export AWS_SECRET_ACCESS_KEY=<AWS SECRET ACCESS KEY> 
-python prepare_cm.py launch -m r3.xlarge --slaves 5 --key-pair <EC2 keypair name> --identity-file <PEM for the EC2 keypair> --instance-type i2.xlarge test_cluster 
+python prepare_cm.py launch --slaves 5 --key-pair <EC2 keypair name> --identity-file <PEM for the EC2 keypair> test_cluster 
 
 ```
 
-With the name of the EC2 key pair in `key-pair`, and the path to the PEM file in `identity-file`. 
+With the name of the EC2 key pair in `key-pair`, and the path to the PEM file in `identity-file`. The command will attempt to choose an AZ automatically, you may need to run it twice if the instances can't be created in the chosen AZ. 
 
 This will create five i2.xlarge instances as DataNodes, each with one 800GB SSD which will be used for HDFS. r3.xlarge instances will be used for the NameNode/ResourceManager, and the Cloudera Manager server.
 

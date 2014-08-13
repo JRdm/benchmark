@@ -18,7 +18,7 @@ class ClouderaCluster:
   TIMEOUT = 100000
   
   PARCELS = [
-     { 'name' : "CDH", 'version' : "5.0.3-1.cdh5.0.3.p0.35" },
+     { 'name' : "CDH", 'version' : "5.1.0-1.cdh5.1.0.p0.53" },
   ]
   
   HADOOP_DATA_DIR_PREFIX="/hadoop"
@@ -122,11 +122,10 @@ class ClouderaCluster:
   
   ### Hive ###
   HIVE_SERVICE_NAME = "HIVE"
-  HIVE_METASTORE_PASSWORD = "PASSWORD"
   HIVE_SERVICE_CONFIG = {
-    'hive_metastore_database_name': 'metastore',
-    'hive_metastore_database_password': HIVE_METASTORE_PASSWORD,
-    'hive_metastore_database_port': 3306,
+    'hive_metastore_database_name': 'hive',
+    'hive_metastore_database_password': 'hive',
+    'hive_metastore_database_port': 5432,
     'hive_metastore_database_type': 'postgresql',
     'zookeeper_service': ZOOKEEPER_SERVICE_NAME,
     'mapreduce_yarn_service': YARN_SERVICE_NAME,
@@ -163,7 +162,7 @@ class ClouderaCluster:
         p.start_download()
         while True:
            p = self.cluster.get_parcel(parcel['name'], parcel['version'])
-           if p.stage == "DOWNLOADED":
+           if p.stage != "DOWNLOADING":
               break
            if p.state.errors:
               raise Exception(str(p.state.errors))
@@ -173,7 +172,7 @@ class ClouderaCluster:
         p.start_distribution()
         while True:
            p = self.cluster.get_parcel(parcel['name'], parcel['version'])
-           if p.stage == "DISTRIBUTED":
+           if p.stage != "DISTRIBUTING":
               break
            if p.state.errors:
               raise Exception(str(p.state.errors))
@@ -265,7 +264,7 @@ class ClouderaCluster:
             break
           except Exception as e:
             print "Exception creating Gateway role: %s" % e
-  
+      
      self._init_hdfs(hdfs_service) 
   
   def _init_hdfs(self, hdfs_service):
@@ -369,6 +368,6 @@ class ClouderaCluster:
         print "Found existing cluster, re-using"
         self.cluster = clusters[0]
         self._clean_up_services()
-        return
-     self._init_cluster()
+     else:
+        self._init_cluster()
      self._deploy_parcels()

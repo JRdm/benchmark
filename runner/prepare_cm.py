@@ -36,7 +36,7 @@ import json
 from optparse import OptionParser
 from sys import stderr
 import boto
-from boto.ec2.blockdevicemapping import BlockDeviceMapping, BlockDeviceType
+from boto.ec2.blockdevicemapping import BlockDeviceMapping, BlockDeviceType, EBSBlockDeviceType
 from boto import ec2
 from cm_api.api_client import ApiResource
 from cm_helper import ClouderaCluster
@@ -48,19 +48,19 @@ def parse_args():
       add_help_option=False)
   parser.add_option("-h", "--help", action="help",
                     help="Show this help message and exit")
-  parser.add_option("-s", "--slaves", type="int", default=1,
-      help="Number of slaves to launch (default: 1)")
+  parser.add_option("-s", "--slaves", type="int", default=3,
+      help="Number of slaves to launch (default: 3)")
   parser.add_option("-w", "--wait", type="int", default=120,
       help="Seconds to wait for nodes to start (default: 120)")
   parser.add_option("-k", "--key-pair",
       help="Key pair to use on instances")
   parser.add_option("-i", "--identity-file",
       help="SSH private key file to use for logging into instances")
-  parser.add_option("-t", "--instance-type", default="m1.large",
-      help="Type of instance to launch (default: m1.large). " +
+  parser.add_option("-t", "--instance-type", default="i2.xlarge",
+      help="Type of instance to launch (default: i2.xlarge). " +
            "WARNING: must be 64-bit; small instances won't work")
-  parser.add_option("-m", "--master-instance-type", default="",
-      help="Master instance type (leave empty for same as instance-type)")
+  parser.add_option("-m", "--master-instance-type", default="r3.xlarge",
+      help="Master instance type (defaults to r3.xlarge)")
   parser.add_option("-r", "--region", default="us-east-1",
       help="EC2 region zone to launch instances in")
   parser.add_option("-z", "--zone", default="",
@@ -68,7 +68,7 @@ def parse_args():
            "slaves across multiple (an additional $0.01/Gb for bandwidth" +
            "between zones applies)")
   parser.add_option("-a", "--ami", help="Amazon Machine Image ID to use",
-                    default="ami-a25415cb")
+                    default="ami-3218595b")
   parser.add_option("--ebs-vol-size", metavar="SIZE", type="int", default=0,
       help="Attach a new EBS volume of size SIZE (in GB) to each node as " +
            "/vol. The volumes will be deleted when the instances terminate. " +
@@ -171,181 +171,178 @@ def launch_cluster(conn, OPTS, cluster_name):
     cm_group.authorize('tcp', 0, 65535, '0.0.0.0/0')
 
   # Check if instances are already running in our groups
-  if OPTS.resume:
-    return get_existing_cluster(conn, OPTS, cluster_name, die_on_error=False)
-  else:
-    active_nodes = get_existing_cluster(conn, OPTS, cluster_name, die_on_error=False)
-    if any(active_nodes):
-      print >> stderr, ("ERROR: There are already instances running in " +
-          "group %s or %s" % (master_group.name, slave_group.name))
-      sys.exit(1)
+  active_nodes = get_existing_cluster(conn, OPTS, cluster_name, die_on_error=False)
+  if any(active_nodes):
+    print >> stderr, ("ERROR: There are already instances running in " +
+        "group %s or %s" % (master_group.name, slave_group.name))
+    sys.exit(1)
 
-    print "Launching instances..."
+  print "Launching instances..."
 
+  try:
+    image = conn.get_all_images(image_ids=[OPTS.ami])[0]
+  except:
+    print >> stderr, "Could not find AMI " + OPTS.ami
+    sys.exit(1)
+
+  # Create block device mapping so that we can add an EBS volume if asked to
+  block_map = BlockDeviceMapping()
+  root_volume = EBSBlockDeviceType()
+  root_volume.size=30
+  block_map["/dev/sda1"]=root_volume
+  device = BlockDeviceType()
+  device.ephemeral_name = 'ephemeral0'
+  device.delete_on_termination = True
+  block_map["/dev/sdv"] = device
+
+  # Launch slaves
+  if OPTS.spot_price != None:
+    # Launch spot instances with the requested price
+    print ("Requesting %d slaves as spot instances with price $%.3f" %
+          (OPTS.slaves, OPTS.spot_price))
+    zones = get_zones(conn, OPTS)
+    num_zones = len(zones)
+    i = 0
+    my_req_ids = []
+    cm_req_ids = []
+    master_req_ids = []
+    for zone in zones:
+      num_slaves_this_zone = get_partition(OPTS.slaves, num_zones, i)
+      cm_reqs = conn.request_spot_instances(
+          price = OPTS.spot_price,
+          image_id = OPTS.ami,
+          launch_group = "launch-group-%s" % cluster_name,
+          placement = zone,
+          count = 1,
+          key_name = OPTS.key_pair,
+          security_groups = [cm_group],
+          instance_type = OPTS.master_instance_type,
+          block_device_map = block_map)
+      master_reqs = conn.request_spot_instances(
+          price = OPTS.spot_price,
+          image_id = OPTS.ami,
+          launch_group = "launch-group-%s" % cluster_name,
+          placement = zone,
+          count = 1,
+          key_name = OPTS.key_pair,
+          security_groups = [master_group],
+          instance_type = OPTS.master_instance_type,
+          block_device_map = block_map)
+      slave_reqs = conn.request_spot_instances(
+          price = OPTS.spot_price,
+          image_id = OPTS.ami,
+          launch_group = "launch-group-%s" % cluster_name,
+          placement = zone,
+          count = num_slaves_this_zone,
+          key_name = OPTS.key_pair,
+          security_groups = [slave_group],
+          instance_type = OPTS.instance_type,
+          block_device_map = block_map)
+      my_req_ids += [req.id for req in slave_reqs]
+      cm_req_ids += [req.id for req in cm_reqs]
+      master_req_ids += [req.id for req in master_reqs]
+      i += 1
+
+    print "Waiting for spot instances to be granted..."
     try:
-      image = conn.get_all_images(image_ids=[OPTS.ami])[0]
-    except:
-      print >> stderr, "Could not find AMI " + OPTS.ami
-      sys.exit(1)
+      while True:
+        time.sleep(10)
+        reqs = conn.get_all_spot_instance_requests()
+        id_to_req = {}
+        for r in reqs:
+          id_to_req[r.id] = r
+        active_instance_ids = []
+        cm_instance_ids = []
+        master_instance_ids = []
+        for i in my_req_ids:
+          if i in id_to_req and id_to_req[i].state == "active":
+            active_instance_ids.append(id_to_req[i].instance_id)
+        for i in master_req_ids:
+          if i in id_to_req and id_to_req[i].state == "active":
+            master_instance_ids.append(id_to_req[i].instance_id)
+        for i in cm_req_ids:
+          if i in id_to_req and id_to_req[i].state == "active":
+            cm_instance_ids.append(id_to_req[i].instance_id)
+        if len(active_instance_ids) == OPTS.slaves and len(master_instance_ids) == 1 and len(cm_instance_ids) == 1:
+          print "All %d slaves granted" % OPTS.slaves
+          slave_nodes = []
+          master_nodes = []
+          cm_nodes = []
+          for r in conn.get_all_instances(active_instance_ids):
+            slave_nodes += r.instances
+          for r in conn.get_all_instances(master_instance_ids):
+            master_nodes += r.instances
+          for r in conn.get_all_instances(cm_instance_ids):
+            cm_nodes += r.instances
+          break
+        else:
+          print "%d of %d slaves granted, waiting longer" % (
+            len(active_instance_ids), OPTS.slaves)
+    except Exception as e:
+      print e
+      print "Canceling spot instance requests"
+      conn.cancel_spot_instance_requests(my_req_ids)
+      # Log a warning if any of these requests actually launched instances:
+      (master_nodes, slave_nodes, cm_nodes) = get_existing_cluster(
+          conn, OPTS, cluster_name, die_on_error=False)
+      running = len(master_nodes) + len(slave_nodes) + len(cm_nodes)
+      if running:
+        print >> stderr, ("WARNING: %d instances are still running" % running)
+      sys.exit(0)
+  else:
+    # Launch non-spot instances
+    zones = get_zones(conn, OPTS)
+    num_zones = len(zones)
+    i = 0
+    slave_nodes = []
+    for zone in zones:
+      num_slaves_this_zone = get_partition(OPTS.slaves, num_zones, i)
+      if num_slaves_this_zone > 0:
+        slave_res = image.run(key_name = OPTS.key_pair,
+                              security_groups = [slave_group],
+                              instance_type = OPTS.instance_type,
+                              placement = zone,
+                              min_count = num_slaves_this_zone,
+                              max_count = num_slaves_this_zone,
+                              block_device_map = block_map)
+        slave_nodes += slave_res.instances
+        print "Launched %d slaves in %s, regid = %s" % (num_slaves_this_zone,
+                                                        zone, slave_res.id)
+      i += 1
 
-    # Create block device mapping so that we can add an EBS volume if asked to
-    block_map = BlockDeviceMapping()
-    root_volume = BlockDeviceType()
-    root_volume.size=30
-    block_map["/dev/sda1"]=root_volume
-    device = BlockDeviceType()
-    device.ephemeral_name = 'ephemeral0'
-    device.delete_on_termination = True
-    block_map["/dev/sdv"] = device
+    # Launch masters
+    master_type = OPTS.master_instance_type
+    if master_type == "":
+      master_type = OPTS.instance_type
+    if OPTS.zone == 'all':
+      OPTS.zone = random.choice(conn.get_all_zones()).name
+    master_res = image.run(key_name = OPTS.key_pair,
+                          security_groups = [master_group],
+                          instance_type = master_type,
+                          placement = OPTS.zone,
+                          min_count = 1,
+                          max_count = 1,
+                          block_device_map = block_map)
+    master_nodes = master_res.instances
+    print "Launched master in %s, regid = %s" % (zone, master_res.id)
 
-    # Launch slaves
-    if OPTS.spot_price != None:
-      # Launch spot instances with the requested price
-      print ("Requesting %d slaves as spot instances with price $%.3f" %
-            (OPTS.slaves, OPTS.spot_price))
-      zones = get_zones(conn, OPTS)
-      num_zones = len(zones)
-      i = 0
-      my_req_ids = []
-      cm_req_ids = []
-      master_req_ids = []
-      for zone in zones:
-        num_slaves_this_zone = get_partition(OPTS.slaves, num_zones, i)
-        cm_reqs = conn.request_spot_instances(
-            price = OPTS.spot_price,
-            image_id = OPTS.ami,
-            launch_group = "launch-group-%s" % cluster_name,
-            placement = zone,
-            count = 1,
-            key_name = OPTS.key_pair,
-            security_groups = [cm_group],
-            instance_type = OPTS.master_instance_type,
-            block_device_map = block_map)
-        master_reqs = conn.request_spot_instances(
-            price = OPTS.spot_price,
-            image_id = OPTS.ami,
-            launch_group = "launch-group-%s" % cluster_name,
-            placement = zone,
-            count = 1,
-            key_name = OPTS.key_pair,
-            security_groups = [master_group],
-            instance_type = OPTS.master_instance_type,
-            block_device_map = block_map)
-        slave_reqs = conn.request_spot_instances(
-            price = OPTS.spot_price,
-            image_id = OPTS.ami,
-            launch_group = "launch-group-%s" % cluster_name,
-            placement = zone,
-            count = num_slaves_this_zone,
-            key_name = OPTS.key_pair,
-            security_groups = [slave_group],
-            instance_type = OPTS.instance_type,
-            block_device_map = block_map)
-        my_req_ids += [req.id for req in slave_reqs]
-        cm_req_ids += [req.id for req in cm_reqs]
-        master_req_ids += [req.id for req in master_reqs]
-        i += 1
+    cm_type = OPTS.master_instance_type
+    if cm_type == "":
+      cm_type = OPTS.instance_type
+    if OPTS.zone == 'all':
+      OPTS.zone = random.choice(conn.get_all_zones()).name
+    cm_res = image.run(key_name = OPTS.key_pair,
+                          security_groups = [cm_group],
+                          instance_type = cm_type,
+                          placement = OPTS.zone,
+                          min_count = 1,
+                          max_count = 1,
+                          block_device_map = block_map)
+    cm_nodes = cm_res.instances
+    print "Launched cm in %s, regid = %s" % (zone, cm_res.id)
 
-      print "Waiting for spot instances to be granted..."
-      try:
-        while True:
-          time.sleep(10)
-          reqs = conn.get_all_spot_instance_requests()
-          id_to_req = {}
-          for r in reqs:
-            id_to_req[r.id] = r
-          active_instance_ids = []
-          cm_instance_ids = []
-          master_instance_ids = []
-          for i in my_req_ids:
-            if i in id_to_req and id_to_req[i].state == "active":
-              active_instance_ids.append(id_to_req[i].instance_id)
-          for i in master_req_ids:
-            if i in id_to_req and id_to_req[i].state == "active":
-              master_instance_ids.append(id_to_req[i].instance_id)
-          for i in cm_req_ids:
-            if i in id_to_req and id_to_req[i].state == "active":
-              cm_instance_ids.append(id_to_req[i].instance_id)
-          if len(active_instance_ids) == OPTS.slaves and len(master_instance_ids) == 1 and len(cm_instance_ids) == 1:
-            print "All %d slaves granted" % OPTS.slaves
-            slave_nodes = []
-            master_nodes = []
-            cm_nodes = []
-            for r in conn.get_all_instances(active_instance_ids):
-              slave_nodes += r.instances
-            for r in conn.get_all_instances(master_instance_ids):
-              master_nodes += r.instances
-            for r in conn.get_all_instances(cm_instance_ids):
-              cm_nodes += r.instances
-            break
-          else:
-            print "%d of %d slaves granted, waiting longer" % (
-              len(active_instance_ids), OPTS.slaves)
-      except Exception as e:
-        print e
-        print "Canceling spot instance requests"
-        conn.cancel_spot_instance_requests(my_req_ids)
-        # Log a warning if any of these requests actually launched instances:
-        (master_nodes, slave_nodes, cm_nodes) = get_existing_cluster(
-            conn, OPTS, cluster_name, die_on_error=False)
-        running = len(master_nodes) + len(slave_nodes) + len(cm_nodes)
-        if running:
-          print >> stderr, ("WARNING: %d instances are still running" % running)
-        sys.exit(0)
-    else:
-      # Launch non-spot instances
-      zones = get_zones(conn, OPTS)
-      num_zones = len(zones)
-      i = 0
-      slave_nodes = []
-      for zone in zones:
-        num_slaves_this_zone = get_partition(OPTS.slaves, num_zones, i)
-        if num_slaves_this_zone > 0:
-          slave_res = image.run(key_name = OPTS.key_pair,
-                                security_groups = [slave_group],
-                                instance_type = OPTS.instance_type,
-                                placement = zone,
-                                min_count = num_slaves_this_zone,
-                                max_count = num_slaves_this_zone,
-                                block_device_map = block_map)
-          slave_nodes += slave_res.instances
-          print "Launched %d slaves in %s, regid = %s" % (num_slaves_this_zone,
-                                                          zone, slave_res.id)
-        i += 1
-
-      # Launch masters
-      master_type = OPTS.master_instance_type
-      if master_type == "":
-        master_type = OPTS.instance_type
-      if OPTS.zone == 'all':
-        OPTS.zone = random.choice(conn.get_all_zones()).name
-      master_res = image.run(key_name = OPTS.key_pair,
-                            security_groups = [master_group],
-                            instance_type = master_type,
-                            placement = OPTS.zone,
-                            min_count = 1,
-                            max_count = 1,
-                            block_device_map = block_map)
-      master_nodes = master_res.instances
-      print "Launched master in %s, regid = %s" % (zone, master_res.id)
-
-      cm_type = OPTS.master_instance_type
-      if cm_type == "":
-        cm_type = OPTS.instance_type
-      if OPTS.zone == 'all':
-        OPTS.zone = random.choice(conn.get_all_zones()).name
-      cm_res = image.run(key_name = OPTS.key_pair,
-                            security_groups = [cm_group],
-                            instance_type = cm_type,
-                            placement = OPTS.zone,
-                            min_count = 1,
-                            max_count = 1,
-                            block_device_map = block_map)
-      cm_nodes = cm_res.instances
-      print "Launched cm in %s, regid = %s" % (zone, cm_res.id)
-
-    # Return all the instances
-    return (master_nodes, slave_nodes, cm_nodes)
+  # Return all the instances
+  return (master_nodes, slave_nodes, cm_nodes)
 
 
 # Get the EC2 instances in an existing cluster if available.
@@ -402,6 +399,9 @@ def setup_cluster(conn, master_nodes, slave_nodes, cm_nodes, OPTS, deploy_ssh_ke
   print "Setting up cm agent on master..."
   setup_cm_slave(cm, master, OPTS)
 
+  print "Setting up Hive metastore db..."
+  setup_cm_metastore(cm, master, OPTS)
+
   print "Setting up cm agent on slaves..."
   for slave in slave_nodes:
 
@@ -435,12 +435,14 @@ def enable_root(node):
   ssh(node.public_dns_name, OPTS, cmd)
 
 def configure_node(node):
+  scp(node.public_dns_name, OPTS, 'xvda.layout', '/tmp/xvda.layout')
   cmd = """
         yum -y install git;
         sed -e 's/SELINUX=enforcing//g' /etc/selinux/config > /etc/selinux/config;
         echo "SELINUX=disabled" >> /etc/selinux/config;
         chkconfig iptables off;
         chkconfig ip6tables off;
+        sfdisk -f /dev/xvda < /tmp/xvda.layout;
         shutdown -r now;
         """
 
@@ -448,9 +450,10 @@ def configure_node(node):
 
 def start_services(node):
   cmd = """
-  mkfs.ext4 /dev/xvdz;
+  resize2fs /dev/xvda1;
+  mkfs.ext4 /dev/xvdv;
   mkdir /hadoop;
-  mount /dev/xvdz /hadoop;
+  mount /dev/xvdv /hadoop;
   /etc/init.d/ntpd restart;
   """
 
@@ -475,6 +478,20 @@ def setup_cm_master(cm, OPTS):
         """
   ssh(cm.public_dns_name, OPTS, cmd, stdin=None)
 
+# Setup the hive metastore
+def setup_cm_metastore(cm, host, OPTS):
+  scp(host.public_dns_name, OPTS, 'hive_setup.sql', '/tmp/hive_setup.sql')
+  cmd = """
+        sudo yum install -y postgresql-server;
+        sudo service postgresql initdb;
+        sudo service postgresql start;
+        sleep 10;
+        sudo -u postgres psql -f /tmp/hive_setup.sql;
+        sudo sed -i 's/ident/md5/g' /var/lib/pgsql/data/pg_hba.conf;
+        sudo service postgresql restart;
+        """
+  ssh(host.public_dns_name, OPTS, cmd, stdin=None)
+
 # Setup the CM Slave and start the CM agent
 def setup_cm_slave(cm, slave, OPTS):
   cmd = """
@@ -498,7 +515,8 @@ def deploy_services(cm, master, slaves, OPTS={}):
   cluster.deploy_hdfs ()
   cluster.deploy_yarn()
   cluster.deploy_hive()
-  cluster.deploy_impala() 
+  cluster.deploy_impala()
+  cluster.cluster.deploy_client_config().wait() 
   cluster.cluster.stop().wait()
   cluster.cluster.start().wait()
 
@@ -610,7 +628,7 @@ def main():
   elif action == "cm-start":
     (master, slave_nodes, cm) = get_existing_cluster(
       conn, OPTS, cluster_name, die_on_error=False)
-    ssh(cm[0].public_dns_name, OPTS, "sudo service cloudera-scm-server start; sleep 10; service cloudera-scm-server status;")
+    ssh(cm[0].public_dns_name, OPTS, "sudo service cloudera-scm-server start; sleep 10; sudo service cloudera-scm-server status;")
     for f in slave_nodes:
       ssh(f.public_dns_name, OPTS, "sudo service cloudera-scm-agent start;")
     ssh(master[0].public_dns_name, OPTS, "sudo service cloudera-scm-agent start;")

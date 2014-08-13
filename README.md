@@ -3,7 +3,7 @@ Big Data Benchmark
 
 Based on the Berkeley Big Data Benchmark, this repo has scripts to make it easy to:
 
-- deploy an up-to-date HDP cluster on EC2
+- deploy an up-to-date HDP or CM cluster on EC2
 - copy data for the Intel Hadoop Benchmark and TPC-H from S3
 - convert the data sets to Parquet, ORC and RCFile
 - run and time Intel Hadoop Benchmark queries and a subset of TPC-H queries
