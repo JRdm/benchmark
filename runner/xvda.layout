@@ -1,0 +1,7 @@
+# partition table of /dev/xvda
+unit: sectors
+
+/dev/xvda1 : start=       32, size= 62914528, Id=83
+/dev/xvda2 : start=        0, size=        0, Id= 0
+/dev/xvda3 : start=        0, size=        0, Id= 0
+/dev/xvda4 : start=        0, size=        0, Id= 0
